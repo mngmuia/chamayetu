@@ -1,0 +1,4 @@
+UPLOAD THE CONTENTS OF THIS FOLDER TO THE ROOT OF A NEW GITHUB REPOSITORY.
+Do not upload a real .streamlit/secrets.toml file.
+Streamlit main file path: app.py
+Run the four SQL files in the numbered order shown in README.md.
