@@ -354,6 +354,75 @@ def investments_page(group_id, user_id):
         register(group_id)
 
 
+def public_frame(records, visible_columns=None, labels=None):
+    frame = pd.DataFrame(records or [])
+    if frame.empty:
+        return frame
+    hidden = {"id", "group_id", "user_id", "member_id", "investment_id", "loan_id", "role_id", "created_by", "updated_by", "approved_by", "verified_by", "submitted_by"}
+    if visible_columns:
+        cols = [c for c in visible_columns if c in frame.columns]
+    else:
+        cols = [c for c in frame.columns if c not in hidden and not c.endswith("_id")]
+    return frame.loc[:, cols].rename(columns=labels or {})
+
+
+def standard_table_page(title, table, group_id, visible_columns=None, labels=None, filters=None, order=None):
+    st.title(title)
+    query_filters = {"group_id": group_id}
+    query_filters.update(filters or {})
+    try:
+        records = rows(table, query_filters, order)
+        display = public_frame(records, visible_columns, labels)
+        if display.empty:
+            st.info(f"No {title.lower()} records are available.")
+        else:
+            st.dataframe(display, use_container_width=True, hide_index=True)
+    except Exception as exc:
+        st.warning(f"{title} is not yet available in the installed database: {exc}")
+
+
+def restored_dashboard(group_id):
+    st.title("Dashboard")
+    cards = []
+    for label, table in [("Members", "members"), ("Payments", "contribution_payments"), ("Loans", "loans"), ("Investments", "investments")]:
+        try:
+            cards.append((label, len(rows(table, {"group_id": group_id}))))
+        except Exception:
+            cards.append((label, 0))
+    columns = st.columns(4)
+    for col, (label, value) in zip(columns, cards):
+        col.metric(label, value)
+
+
+def members_page(group_id):
+    st.title("Members")
+    records = rows("members", {"group_id": group_id}, "membership_number")
+    display = public_frame(records,
+        ["membership_number", "full_name", "email", "phone", "status", "date_joined"],
+        {"membership_number": "Member Code", "full_name": "Full Name", "email": "Email", "phone": "Phone", "status": "Status", "date_joined": "Date Joined"})
+    st.dataframe(display, use_container_width=True, hide_index=True)
+
+
+def settings_page(group_id):
+    st.title("Settings")
+    st.caption("Administrator-only Chama configuration")
+    try:
+        current = rows("group_settings", {"group_id": group_id})
+        current = current[0] if current else {}
+        with st.form("settings_form"):
+            max_loan = st.number_input("Maximum Loan Amount", min_value=0.0, value=float(current.get("max_loan_amount") or 0))
+            multiple = st.number_input("Maximum Loan Multiple", min_value=0.0, value=float(current.get("max_loan_multiple") or 3))
+            rate = st.number_input("Default Interest Rate (%)", min_value=0.0, value=float(current.get("interest_rate") or 12))
+            term = st.number_input("Maximum Term (Months)", min_value=1, value=int(current.get("max_term_months") or 24))
+            checker = st.checkbox("Require Checker", value=bool(current.get("require_checker", True)))
+            approver = st.checkbox("Require Approver", value=bool(current.get("require_approver", True)))
+            if st.form_submit_button("Save Settings"):
+                sb.table("group_settings").upsert({"group_id": group_id, "max_loan_amount": max_loan or None, "max_loan_multiple": multiple, "interest_rate": rate, "max_term_months": term, "require_checker": checker, "require_approver": approver}).execute()
+                st.success("Settings saved")
+    except Exception as exc:
+        st.warning(f"Settings are not yet available: {exc}")
+
+
 def main():
     user = session_user()
     if not user:
@@ -367,23 +436,49 @@ def main():
     if not group_id:
         st.error("No Chama Yetu group is available for this account.")
         return
+    is_admin = p.get("role") == "admin"
+    member_id = p.get("member_id")
+    admin_pages = ["Dashboard", "Members", "Contributions", "Historical Payments", "Payment Verification", "Roles", "Loans", "Loan Repayments", "Investments", "Monthly Returns", "Return Allocation", "Expenses", "Accounting", "Bank Reconciliation", "Investment Reconciliation", "Reports", "Audit Log", "Settings"]
+    member_pages = ["Dashboard", "My Profile", "My Contributions", "Submit Payment", "My Loans", "Apply for Loan", "My Repayments", "My Investments", "My Returns", "My Statement"]
     with st.sidebar:
         st.title("Chama Yetu")
         st.write(p.get("full_name") or user.email)
-        view = st.radio("View as", ["admin", "member"], horizontal=True, disabled=p.get("role") != "admin")
-        page = st.radio("Navigation", ["Dashboard", "Investments"])
+        view = st.radio("View as", ["admin", "member"], horizontal=True, disabled=not is_admin)
+        page = st.radio("Navigation", admin_pages if view == "admin" else member_pages)
         if st.button("Sign out"):
             sb.auth.sign_out()
             st.session_state.clear()
             st.rerun()
-    if page == "Investments" and view == "admin":
-        investments_page(group_id, user.id)
-    elif page == "Investments":
-        st.title("Investments")
-        st.info("Member investment BI will display approved aggregate information only.")
+    if view == "admin":
+        if page == "Dashboard": restored_dashboard(group_id)
+        elif page == "Members": members_page(group_id)
+        elif page == "Contributions": standard_table_page("Contributions", "contribution_schedules", group_id, ["contribution_period", "due_date", "expected_amount", "status", "notes"])
+        elif page == "Historical Payments": standard_table_page("Historical Payments", "contribution_payments", group_id, ["payment_date", "payment_reference", "payment_method", "amount", "verification_status", "source_document", "notes"], filters={"is_historical": True})
+        elif page == "Payment Verification": standard_table_page("Payment Verification", "contribution_payments", group_id, ["payment_date", "payment_reference", "payment_method", "amount", "verification_status", "rejection_reason"])
+        elif page == "Roles": standard_table_page("Roles", "app_roles", group_id, ["code", "name", "description", "active"])
+        elif page == "Loans": standard_table_page("Loans", "loans", group_id, ["principal_amount", "annual_interest_rate", "interest_method", "term_months", "disbursement_date", "total_amount_repayable", "status"])
+        elif page == "Loan Repayments": standard_table_page("Loan Repayments", "loan_repayments", group_id, ["payment_date", "payment_reference", "payment_method", "amount", "verification_status"])
+        elif page == "Investments": investments_page(group_id, user.id)
+        elif page == "Monthly Returns": standard_table_page("Monthly Returns", "investment_monthly_returns", group_id, ["reporting_month", "gross_return", "direct_expenses", "shared_expenses", "tax_amount", "net_return", "distributable_return", "status"])
+        elif page == "Return Allocation": standard_table_page("Return Allocation", "member_return_allocations", group_id, ["reporting_month", "applicable_balance", "allocation_pct", "net_return_allocated", "reinvested_amount", "payable_amount"])
+        elif page == "Expenses": standard_table_page("Expenses", "expenses", group_id, ["expense_date", "description", "amount", "payment_method", "payment_reference", "payee", "status"])
+        elif page == "Accounting": standard_table_page("Accounting", "journal_headers", group_id, ["journal_no", "journal_date", "description", "status", "posted_at"])
+        elif page == "Bank Reconciliation": standard_table_page("Bank Reconciliation", "bank_reconciliations", group_id)
+        elif page == "Investment Reconciliation": standard_table_page("Investment Reconciliation", "investment_reconciliations", group_id)
+        elif page == "Reports": restored_dashboard(group_id)
+        elif page == "Audit Log": standard_table_page("Audit Log", "audit_logs", group_id, ["action", "entity_type", "description", "created_at"])
+        elif page == "Settings": settings_page(group_id)
     else:
-        st.title("Dashboard")
-        st.info("Use Investments to manage the Investment Register, details, transactions, valuations and GL entries.")
+        if page == "Dashboard": restored_dashboard(group_id)
+        elif page == "My Profile": members_page(group_id)
+        elif page == "My Contributions": standard_table_page("My Contributions", "contribution_payments", group_id, ["payment_date", "payment_reference", "payment_method", "amount", "verification_status"], filters={"member_id": member_id})
+        elif page == "Submit Payment": st.info("Payment submission form will use the signed-in member account.")
+        elif page == "My Loans": standard_table_page("My Loans", "loans", group_id, ["principal_amount", "annual_interest_rate", "term_months", "total_amount_repayable", "status"], filters={"borrower_id": member_id})
+        elif page == "Apply for Loan": st.info("Loan application form will use the signed-in member account.")
+        elif page == "My Repayments": standard_table_page("My Repayments", "loan_repayments", group_id, ["payment_date", "payment_reference", "amount", "verification_status"], filters={"member_id": member_id})
+        elif page == "My Investments": standard_table_page("My Investments", "member_investment_transactions", group_id, ["transaction_date", "transaction_type", "description", "amount"], filters={"member_id": member_id})
+        elif page == "My Returns": standard_table_page("My Returns", "member_return_allocations", group_id, ["reporting_month", "applicable_balance", "allocation_pct", "net_return_allocated", "reinvested_amount", "payable_amount"], filters={"member_id": member_id})
+        elif page == "My Statement": standard_table_page("My Statement", "member_investment_transactions", group_id, ["transaction_date", "transaction_type", "description", "amount"], filters={"member_id": member_id})
 
 
 if __name__ == "__main__":
